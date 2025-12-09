@@ -8,7 +8,7 @@ from difflib import get_close_matches
 # ---------------------
 # Load data
 # ---------------------
-df = pd.read_csv("./data/netflix_titles.csv")
+df = pd.read_csv("netflix_titles.csv")
 
 movies = df[df["type"] == "Movie"].copy().reset_index(drop=True)
 
