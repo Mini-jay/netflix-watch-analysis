@@ -7,28 +7,23 @@ from difflib import get_close_matches
 # ---------------------
 # Load data
 # ---------------------
+# CSV is in the same folder as app.py on Streamlit Cloud
 df = pd.read_csv("netflix_titles.csv")
 
-# Only movies (you can change to TV Show or both later)
+# Only movies (you can change this later)
 movies = df[df["type"] == "Movie"].copy().reset_index(drop=True)
 
-# Fill missing text fields
-for col in ["description", "listed_in", "cast", "director"]:
+# Fill missing fields
+for col in ["description", "listed_in"]:
     movies[col] = movies[col].fillna("")
 
-# Normalize genres as list
-movies["genres_list"] = movies["listed_in"].str.split(", ").fillna([])
-
-# Combined text: description + genres + cast + director
-movies["combined"] = (
-    movies["description"]
-    + " "
-    + movies["listed_in"]
-    + " "
-    + movies["cast"]
-    + " "
-    + movies["director"]
+# Primary genre = first in the comma-separated list
+movies["primary_genre"] = movies["listed_in"].apply(
+    lambda x: x.split(",")[0].strip() if isinstance(x, str) and x.strip() else "Unknown"
 )
+
+# Combined text = description + all genres
+movies["combined"] = movies["description"] + " " + movies["listed_in"]
 
 # ---------------------
 # TF-IDF vectorizer
@@ -38,12 +33,12 @@ tfidf_matrix = tfidf.fit_transform(movies["combined"])
 
 cosine_sim = cosine_similarity(tfidf_matrix)
 
-# index lookup
+# Lookup: title (lowercase) -> index
 title_to_index = {movies.loc[i, "title"].lower(): i for i in movies.index}
 
 
 # ---------------------
-# recommender function (with genre-aware reranking)
+# Recommender (genre-aware)
 # ---------------------
 def recommend(movie_title, num_recommendations=5):
     key = movie_title.strip().lower()
@@ -61,44 +56,50 @@ def recommend(movie_title, num_recommendations=5):
     # base similarity scores
     sim_scores = list(enumerate(cosine_sim[idx]))
 
-    # get query genres
-    query_genres = set(movies.loc[idx, "genres_list"])
+    # query genre
+    query_genre = movies.loc[idx, "primary_genre"]
 
-    ranked = []
+    # separate candidates: same-genre and others
+    same_genre = []
+    other_genre = []
+
     for i, score in sim_scores:
         if i == idx:
             continue  # skip itself
-        target_genres = set(movies.loc[i, "genres_list"])
-        genre_overlap = len(query_genres & target_genres)
-        ranked.append((i, score, genre_overlap))
+        if movies.loc[i, "primary_genre"] == query_genre:
+            same_genre.append((i, score))
+        else:
+            other_genre.append((i, score))
 
-    # 1) sort by: genre overlap (desc), then similarity score (desc)
-    ranked.sort(key=lambda x: (x[2], x[1]), reverse=True)
+    # sort each list by similarity score (desc)
+    same_genre.sort(key=lambda x: x[1], reverse=True)
+    other_genre.sort(key=lambda x: x[1], reverse=True)
 
-    # if everything has 0 genre overlap, fall back to pure similarity
-    if all(r[2] == 0 for r in ranked):
-        ranked = sorted(ranked, key=lambda x: x[1], reverse=True)
+    # take from same genre first
+    chosen = same_genre[:num_recommendations]
 
-    # take top N
-    top = ranked[:num_recommendations]
-    indices = [i for i, _, _ in top]
+    # if not enough, fill from others
+    if len(chosen) < num_recommendations:
+        remaining = num_recommendations - len(chosen)
+        chosen += other_genre[:remaining]
 
+    indices = [i for i, _ in chosen]
     return movies.iloc[indices], None
 
 
 # ---------------------
 # Streamlit UI
 # ---------------------
-st.title("🎬 Netflix Movie Recommender (v2.0)")
+st.title("🎬 Netflix Movie Recommender")
 
 st.write(
-    "Content-based recommendations using description, genres, cast & director, "
-    "with genre-aware reranking."
+    "Recommendations based on description + genres, "
+    "with a preference for movies in the same main genre."
 )
 
 user_input = st.text_input("Enter a movie title")
 
-num_recs = st.slider("Number of recommendations", 1, 10, 5)
+num_recs = st.slider("Number of recommendations", 1, 10, 5, 5)
 
 if st.button("Get Recommendations"):
     if not user_input.strip():
@@ -109,12 +110,16 @@ if st.button("Get Recommendations"):
         if error:
             st.error(error)
         else:
+            query_idx = title_to_index.get(user_input.strip().lower())
+            if query_idx is not None:
+                st.info(f"Detected primary genre: **{movies.loc[query_idx, 'primary_genre']}**")
+
             st.success(f"Because you watched **{user_input}**:")
 
             for _, row in result.iterrows():
                 st.markdown(f"### 🎞 {row['title']} ({row['release_year']})")
-                st.write(f"**Genres:** {row['listed_in']}")
+                st.write(f"**Primary genre:** {row['primary_genre']}")
+                st.write(f"**All genres:** {row['listed_in']}")
                 st.write(f"**Rating:** {row['rating']}")
                 st.write(row["description"])
                 st.write("---")
-
