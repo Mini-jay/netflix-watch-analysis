@@ -7,7 +7,7 @@ from sentence_transformers import SentenceTransformer
 
 # Set Streamlit page config
 st.set_page_config(
-    page_title="Advanced Netflix Recommender",
+    page_title="Intelligent Hybrid Recommender",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -20,10 +20,11 @@ st.set_page_config(
 def load_data():
     """Loads and preprocesses the Netflix data, creating a rich combined text column."""
     try:
+        # NOTE: Ensure netflix_titles.csv is in the same directory
         df = pd.read_csv("netflix_titles.csv")
     except FileNotFoundError:
         st.error("Error: 'netflix_titles.csv' not found. Please ensure the file is in the same directory.")
-        return pd.DataFrame() # Return empty DataFrame on failure
+        return pd.DataFrame() 
 
     movies = df[df["type"] == "Movie"].copy().reset_index(drop=True)
 
@@ -31,23 +32,28 @@ def load_data():
     for col in ["description", "listed_in", "director", "cast", "country"]:
         movies[col] = movies[col].fillna("")
 
-    # 2. Extract primary genre (first label)
-    movies["primary_genre"] = movies["listed_in"].apply(
-        lambda x: x.split(",")[0].strip() if isinstance(x, str) and x.strip() else "Unknown"
-    )
-
-    # 3. Enhanced 'combined' text for embeddings (Including Director, Top 3 Cast, and Country)
+    # --- Feature Engineering for Better Embeddings ---
+    
+    # Helper to clean and limit cast names to the top 3
     def clean_and_limit_cast(cast_str):
         # Take the top 3 actors and join with spaces
         return " ".join(cast_str.split(",")[:3]).replace(",", " ").strip()
 
+    # Create a cleaned genre string (for the content vector)
+    movies["all_genres"] = movies["listed_in"].apply(lambda x: x.replace(",", " "))
+    
+    # Create the enhanced combined text feature
     movies["combined"] = (
+        # 1. Repeat genres three times for high emphasis in the embedding space
+        movies["all_genres"] + " " + movies["all_genres"] + " " + movies["all_genres"] + " " +
+        # 2. Main description
         movies["description"] + " " +
-        movies["listed_in"] + " " +
-        movies["director"].apply(lambda x: x.replace(", ", " ").strip()) + " " + # Director names as keywords
-        movies["country"].apply(lambda x: x.replace(", ", " ").strip()) + " " + # Country names as keywords
+        # 3. Director/Country/Cast as strong keywords
+        movies["director"].apply(lambda x: x.replace(", ", " ").strip()) + " " +
+        movies["country"].apply(lambda x: x.replace(", ", " ").strip()) + " " +
         movies["cast"].apply(clean_and_limit_cast)
     )
+    # --- End Feature Engineering ---
 
     return movies
 
@@ -60,12 +66,12 @@ def load_model():
 
 @st.cache_data
 def compute_embeddings(texts):
-    """Computes and normalizes the embeddings (cached)."""
+    """Computes and analyzes the embeddings (cached)."""
     model = load_model()
     embeddings = model.encode(
         texts.tolist(),
-        show_progress_bar=False, # Streamlit hides console progress, so set to False
-        normalize_embeddings=True # Normalizing is crucial for cosine similarity
+        show_progress_bar=False,
+        normalize_embeddings=True 
     )
     return embeddings
 
@@ -74,40 +80,33 @@ movies = load_data()
 
 if not movies.empty:
     embeddings = compute_embeddings(movies["combined"])
-    # Create the title map AFTER loading data
     title_to_index = {movies.loc[i, "title"].lower(): i for i in movies.index}
 else:
-    st.stop() # Stop execution if data failed to load
+    st.stop() 
 
 # ---------------------
-# 2. Helper for year score (Using non-linear decay)
+# 2. Helper for year score (Exponential decay)
 # ---------------------
 def year_score(query_year, candidate_year, decay_rate=0.15):
     """Calculates a score based on year proximity using exponential decay."""
     if pd.isna(query_year) or pd.isna(candidate_year):
         return 0.0
-    # Use 0.15 for a moderate decay. Lower is flatter, higher is steeper.
     diff = abs(query_year - candidate_year)
     return np.exp(-decay_rate * diff)
 
 
 # ---------------------
-# 3. The Hybrid Recommender function
+# 3. The Hybrid Recommender function (with Multi-Genre Scoring)
 # ---------------------
 def recommend(movie_title, num_recommendations, weights):
     """
-    Generates hybrid recommendations based on semantic similarity, genre, and year.
-    
-    Args:
-        movie_title (str): The movie the user liked.
-        num_recommendations (int): Number of recommendations to return.
-        weights (dict): A dictionary of weights for the hybrid score components.
+    Generates hybrid recommendations based on semantic similarity, multi-genre overlap, and year.
     """
     key = movie_title.strip().lower()
 
     # 1. Fuzzy Matching
     if key not in title_to_index:
-        close = get_close_matches(key, title_to_index.keys(), n=1, cutoff=0.6) # Increased cutoff
+        close = get_close_matches(key, title_to_index.keys(), n=1, cutoff=0.6)
         if close:
             key = close[0]
         else:
@@ -115,13 +114,12 @@ def recommend(movie_title, num_recommendations, weights):
 
     idx = title_to_index[key]
 
-    # Get the embedding for the query movie
     query_vec = embeddings[idx].reshape(1, -1)
-    
-    # Calculate cosine similarity with all other movies
     all_sims = cosine_similarity(query_vec, embeddings)[0]
 
-    query_genre = movies.loc[idx, "primary_genre"]
+    # Get genres for the query movie
+    query_genres_str = movies.loc[idx, "listed_in"]
+    query_genres = {g.strip() for g in query_genres_str.split(',') if g.strip()}
     query_year = movies.loc[idx, "release_year"]
     
     candidates = []
@@ -133,20 +131,29 @@ def recommend(movie_title, num_recommendations, weights):
 
         base_sim = all_sims[i]
         
-        # Binary genre score (1.0 if primary genre matches, 0.0 otherwise)
-        same_genre = 1.0 if movies.loc[i, "primary_genre"] == query_genre else 0.0
+        # --- Multi-Genre Overlap Scoring (Jaccard Similarity) ---
+        candidate_genres_str = movies.loc[i, "listed_in"]
+        candidate_genres = {g.strip() for g in candidate_genres_str.split(',') if g.strip()}
         
-        # Year score (using the exponential decay function)
+        # Calculate Intersection and Union
+        intersection = len(query_genres.intersection(candidate_genres))
+        union = len(query_genres.union(candidate_genres))
+        
+        # Jaccard Index: 0.0 if no genres listed, otherwise Intersection / Union
+        genre_overlap_score = intersection / union if union > 0 else 0.0
+        # --- End Multi-Genre Scoring ---
+        
         y_score = year_score(query_year, movies.loc[i, "release_year"])
 
         # Hybrid Score: using user-defined weights
         total_score = (
             weights['semantic'] * base_sim + 
-            weights['genre'] * same_genre + 
+            weights['genre'] * genre_overlap_score +
             weights['year'] * y_score
         )
 
-        candidates.append((i, total_score, base_sim, same_genre, y_score))
+        # Store the component scores for display
+        candidates.append((i, total_score, base_sim, genre_overlap_score, y_score)) 
 
     # 3. Sorting and Filtering
     candidates.sort(key=lambda x: x[1], reverse=True)
@@ -154,7 +161,6 @@ def recommend(movie_title, num_recommendations, weights):
     top = candidates[:num_recommendations]
     indices = [i for i, _, _, _, _ in top]
 
-    # Return the results dataframe and the scores for detailed feedback
     return movies.iloc[indices], top, movies.loc[idx, 'title']
 
 
@@ -162,26 +168,26 @@ def recommend(movie_title, num_recommendations, weights):
 # 4. Streamlit UI
 # ---------------------
 
-st.title("🎬 Advanced Hybrid Movie Recommender")
+st.title("🎬 Intelligent Hybrid Movie Recommender")
 
 st.write(
-    "This system uses **Hybrid Filtering** combining semantic similarity (on description, genres, cast, director) "
-    "with explicit scoring for primary genre match and year proximity."
+    "This system uses **Hybrid Filtering** combining semantic similarity (on enhanced features like cast/director/genres) "
+    "with a **Multi-Genre Overlap Score** and Year Proximity."
 )
 
 st.header("1. Settings")
 
 with st.sidebar:
     st.header("Tune the Hybrid Weights")
-    st.write("Adjust how much influence each factor has on the final score. The total should ideally sum to 1.0.")
+    st.write("Adjust the influence of each factor. For complex movies like Interstellar, rely more on Semantic Similarity.")
     
-    # Tunable Weights
-    semantic_weight = st.slider("Semantic Similarity Weight", 0.0, 1.0, 0.70, 0.05, key='w_sem')
-    genre_weight = st.slider("Primary Genre Match Weight", 0.0, 1.0, 0.25, 0.05, key='w_genre')
-    year_weight = st.slider("Year Proximity Weight", 0.0, 1.0, 0.05, 0.05, key='w_year')
+    # Tunable Weights (Recommended default for nuanced results)
+    semantic_weight = st.slider("Semantic Similarity Weight", 0.0, 1.0, 0.80, 0.05, key='w_sem') # Increased priority
+    genre_weight = st.slider("Multi-Genre Match Weight (Jaccard)", 0.0, 1.0, 0.15, 0.05, key='w_genre') # Reduced priority
+    year_weight = st.slider("Year Proximity Weight (Decay)", 0.0, 1.0, 0.05, 0.05, key='w_year')
     
     total_w = semantic_weight + genre_weight + year_weight
-    st.info(f"Total Weight Sum: **{total_w:.2f}**")
+    st.info(f"Total Weight Sum: **{total_w:.2f}**. Weights are normalized internally.")
     
     weights_dict = {
         'semantic': semantic_weight / total_w, 
@@ -197,12 +203,11 @@ with st.sidebar:
 
 st.header("2. Input")
 
-# Using a selectbox for better user experience
 movie_list = sorted(movies['title'].tolist())
 user_input = st.selectbox(
     "Select a movie you enjoyed:",
     options=[''] + movie_list,
-    index=0 # Starts with an empty selection
+    index=0 
 )
 
 if st.button("Get Recommendations"):
@@ -215,17 +220,18 @@ if st.button("Get Recommendations"):
 
     if isinstance(result_df, pd.DataFrame):
         
-        # Display key info about the query movie
+        # Find the index of the *matched* query movie (in case of fuzzy match)
         key = query_title.strip().lower()
         idx = title_to_index[key]
+        
         st.info(
             f"Query Movie: **{query_title}** ({movies.loc[idx, 'release_year']}). "
-            f"Primary Genre: **{movies.loc[idx, 'primary_genre']}**."
+            f"Genres: **{movies.loc[idx, 'listed_in']}**."
         )
 
-        st.success(f"Because you liked **{query_title}**, we recommend:")
+        st.success(f"Because you liked **{query_title}** (Total Weight Sum: **{total_w:.2f}**):")
         
-        # Display results with detailed scores (from Section 3.1: Detailed Score Feedback)
+        # Display results with detailed scores
         for rank, ((_, row), (_, total_score, sim, genre_sc, year_sc)) in enumerate(zip(result_df.iterrows(), scores)):
             
             st.markdown(f"## {rank+1}. {row['title']} ({row['release_year']})")
@@ -236,7 +242,7 @@ if st.button("Get Recommendations"):
                 st.write(f"**Rating:** {row['rating']}")
                 st.write(f"**Director:** {row['director'].split(',')[0] if row['director'] else 'N/A'}")
                 st.write(f"**Cast:** {row['cast'].split(',')[0]}...")
-                st.write(f"**Primary Genre:** {row['primary_genre']}")
+                st.write(f"**Genres:** {row['listed_in']}")
                 
             with col2:
                 st.markdown(f"**Score Breakdown (Total: {total_score:.3f}):**")
@@ -245,19 +251,25 @@ if st.button("Get Recommendations"):
                 weighted_sim = sim * weights_dict['semantic']
                 weighted_genre = genre_sc * weights_dict['genre']
                 weighted_year = year_sc * weights_dict['year']
-
+                
+                # Visualize the score contribution
+                contribution_data = pd.DataFrame({
+                    'Metric': ['Semantic', 'Multi-Genre', 'Year'],
+                    'Score Contribution': [weighted_sim, weighted_genre, weighted_year]
+                })
+                # st.bar_chart(contribution_data.set_index('Metric'))
+                
                 st.write(
                     f"* Semantic Match: **{sim:.3f}** (Contributed **{weighted_sim:.3f}**)"
                 )
                 st.write(
-                    f"* Genre Match: **{genre_sc:.2f}** (Contributed **{weighted_genre:.3f}**)"
+                    f"* Multi-Genre Overlap (Jaccard): **{genre_sc:.2f}** (Contributed **{weighted_genre:.3f}**)"
                 )
                 st.write(
-                    f"* Year Proximity: **{year_sc:.2f}** (Contributed **{weighted_year:.3f}**)"
+                    f"* Year Proximity (Decay): **{year_sc:.2f}** (Contributed **{weighted_year:.3f}**)"
                 )
                 
             st.markdown(f"_{row['description']}_")
             st.markdown("---")
-
     else:
         st.error(scores) # Display the error message
