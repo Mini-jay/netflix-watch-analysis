@@ -1,49 +1,75 @@
 import streamlit as st
 import pandas as pd
-from sklearn.feature_extraction.text import TfidfVectorizer
+import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 from difflib import get_close_matches
+from sentence_transformers import SentenceTransformer
 
 # ---------------------
-# Load data
+# Load data + model (with caching)
 # ---------------------
-# CSV is in the same folder as app.py on Streamlit Cloud
-df = pd.read_csv("netflix_titles.csv")
 
-# Only movies (you can change this later)
-movies = df[df["type"] == "Movie"].copy().reset_index(drop=True)
+@st.cache_data
+def load_data():
+    df = pd.read_csv("netflix_titles.csv")
+    movies = df[df["type"] == "Movie"].copy().reset_index(drop=True)
 
-# Fill missing fields
-for col in ["description", "listed_in"]:
-    movies[col] = movies[col].fillna("")
+    # fill missing text stuff
+    for col in ["description", "listed_in"]:
+        movies[col] = movies[col].fillna("")
 
-# Primary genre = first in the comma-separated list
-movies["primary_genre"] = movies["listed_in"].apply(
-    lambda x: x.split(",")[0].strip() if isinstance(x, str) and x.strip() else "Unknown"
-)
+    # primary genre (first label)
+    movies["primary_genre"] = movies["listed_in"].apply(
+        lambda x: x.split(",")[0].strip() if isinstance(x, str) and x.strip() else "Unknown"
+    )
 
-# Combined text = description + all genres
-movies["combined"] = movies["description"] + " " + movies["listed_in"]
+    # combined text for embeddings
+    movies["combined"] = movies["description"] + " " + movies["listed_in"]
 
-# ---------------------
-# TF-IDF vectorizer
-# ---------------------
-tfidf = TfidfVectorizer(stop_words="english")
-tfidf_matrix = tfidf.fit_transform(movies["combined"])
+    return movies
 
-cosine_sim = cosine_similarity(tfidf_matrix)
 
-# Lookup: title (lowercase) -> index
+@st.cache_resource
+def load_model():
+    # small, fast sentence transformer
+    return SentenceTransformer("all-MiniLM-L6-v2")
+
+
+@st.cache_data
+def compute_embeddings(texts):
+    model = load_model()
+    embeddings = model.encode(
+        texts.tolist(),
+        show_progress_bar=True,
+        normalize_embeddings=True
+    )
+    return embeddings
+
+
+movies = load_data()
+embeddings = compute_embeddings(movies["combined"])
 title_to_index = {movies.loc[i, "title"].lower(): i for i in movies.index}
 
 
 # ---------------------
-# Recommender (genre-aware)
+# helper for year score
+# ---------------------
+def year_score(query_year, candidate_year, max_diff=25):
+    if pd.isna(query_year) or pd.isna(candidate_year):
+        return 0.0
+    diff = abs(candidate_year - candidate_year)
+    if diff >= max_diff:
+        return 0.0
+    return 1.0 - (diff / max_diff)
+
+
+# ---------------------
+# recommender using embeddings
 # ---------------------
 def recommend(movie_title, num_recommendations=5):
     key = movie_title.strip().lower()
 
-    # exact match or fuzzy match
+    # exact or fuzzy match
     if key not in title_to_index:
         close = get_close_matches(key, title_to_index.keys(), n=1, cutoff=0.4)
         if close:
@@ -53,53 +79,48 @@ def recommend(movie_title, num_recommendations=5):
 
     idx = title_to_index[key]
 
-    # base similarity scores
-    sim_scores = list(enumerate(cosine_sim[idx]))
+    query_vec = embeddings[idx].reshape(1, -1)
+    all_sims = cosine_similarity(query_vec, embeddings)[0]
 
-    # query genre
     query_genre = movies.loc[idx, "primary_genre"]
+    query_year = movies.loc[idx, "release_year"]
 
-    # separate candidates: same-genre and others
-    same_genre = []
-    other_genre = []
+    candidates = []
 
-    for i, score in sim_scores:
+    for i in range(len(movies)):
         if i == idx:
-            continue  # skip itself
-        if movies.loc[i, "primary_genre"] == query_genre:
-            same_genre.append((i, score))
-        else:
-            other_genre.append((i, score))
+            continue
 
-    # sort each list by similarity score (desc)
-    same_genre.sort(key=lambda x: x[1], reverse=True)
-    other_genre.sort(key=lambda x: x[1], reverse=True)
+        base_sim = all_sims[i]
+        same_genre = 1.0 if movies.loc[i, "primary_genre"] == query_genre else 0.0
+        y_score = year_score(query_year, movies.loc[i, "release_year"])
 
-    # take from same genre first
-    chosen = same_genre[:num_recommendations]
+        # You can tune these weights:
+        total = 0.7 * base_sim + 0.25 * same_genre + 0.05 * y_score
 
-    # if not enough, fill from others
-    if len(chosen) < num_recommendations:
-        remaining = num_recommendations - len(chosen)
-        chosen += other_genre[:remaining]
+        candidates.append((i, total, base_sim, same_genre, y_score))
 
-    indices = [i for i, _ in chosen]
+    candidates.sort(key=lambda x: x[1], reverse=True)
+
+    top = candidates[:num_recommendations]
+    indices = [i for i, _, _, _, _ in top]
+
     return movies.iloc[indices], None
 
 
 # ---------------------
 # Streamlit UI
 # ---------------------
-st.title("🎬 Netflix Movie Recommender")
+st.title("🎬 Netflix Movie Recommender – Semantic Version")
 
 st.write(
-    "Recommendations based on description + genres, "
-    "with a preference for movies in the same main genre."
+    "Uses SentenceTransformer embeddings (all-MiniLM-L6-v2) on description + genres, "
+    "plus genre & year awareness for smarter recommendations."
 )
 
 user_input = st.text_input("Enter a movie title")
 
-num_recs = st.slider("Number of recommendations", 1, 10, 5, 5)
+num_recs = st.slider("Number of recommendations", 1, 10, 5)
 
 if st.button("Get Recommendations"):
     if not user_input.strip():
@@ -110,9 +131,13 @@ if st.button("Get Recommendations"):
         if error:
             st.error(error)
         else:
-            query_idx = title_to_index.get(user_input.strip().lower())
-            if query_idx is not None:
-                st.info(f"Detected primary genre: **{movies.loc[query_idx, 'primary_genre']}**")
+            key = user_input.strip().lower()
+            idx = title_to_index.get(key)
+            if idx is not None:
+                st.info(
+                    f"Detected primary genre: **{movies.loc[idx, 'primary_genre']}**, "
+                    f"Year: **{movies.loc[idx, 'release_year']}**"
+                )
 
             st.success(f"Because you watched **{user_input}**:")
 
