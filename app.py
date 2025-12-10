@@ -14,9 +14,9 @@ st.set_page_config(
 
 # --- Define Optimal Weights ---
 OPTIMAL_WEIGHTS = {
-    'semantic': 0.80, # High priority for enhanced semantic vector
-    'genre': 0.15,     # Moderate priority for Multi-Genre Overlap (Jaccard)
-    'year': 0.05       # Low priority for Year Proximity
+    'semantic': 0.80, 
+    'genre': 0.15,     
+    'year': 0.05       
 }
 TOTAL_W = sum(OPTIMAL_WEIGHTS.values())
 WEIGHTS = {k: v / TOTAL_W for k, v in OPTIMAL_WEIGHTS.items()}
@@ -46,7 +46,6 @@ def load_data():
 
     movies["all_genres"] = movies["listed_in"].apply(lambda x: x.replace(",", " "))
     
-    # Create the enhanced combined text feature
     movies["combined"] = (
         movies["all_genres"] + " " + movies["all_genres"] + " " + movies["all_genres"] + " " +
         movies["description"] + " " +
@@ -115,7 +114,12 @@ def recommend(movie_title, num_recommendations, weights):
         else:
             return None, f"🚫 Movie not found: **{movie_title}**. Please check your spelling."
 
-    idx = title_to_index[key]
+    # Use the fuzzy-matched key to ensure we get a valid index
+    idx = title_to_index.get(key)
+    
+    # Critical Check: If the fuzzy match failed or returned a key not in the index (for any reason)
+    if idx is None:
+        return None, f"🚫 Internal Error: Could not finalize match for **{movie_title}**."
 
     query_vec = embeddings[idx].reshape(1, -1)
     all_sims = cosine_similarity(query_vec, embeddings)[0]
@@ -187,7 +191,7 @@ with col_slider:
     num_recs = st.slider("How many suggestions do you want?", 1, 15, 7)
 
 with col_button:
-    st.markdown("<br>", unsafe_allow_html=True) # Adds a little vertical spacing for alignment
+    st.markdown("<br>", unsafe_allow_html=True) 
     if st.button("Find My Next Watch 🎬"):
         if not user_input.strip():
             st.warning("Please enter a movie title to get started.")
@@ -205,19 +209,17 @@ with col_button:
                 
                 st.markdown(f"## {rank+1}. {row['title']} ({row['release_year']})")
                 
-                col_meta, col_desc, col_score = st.columns([1.5, 3, 1.5])
+                # --- FIXED COLUMN STRUCTURE ---
+                # Use fewer columns and put the description BELOW for better alignment
+                col_meta, col_score = st.columns([4, 2]) 
                 
                 with col_meta:
-                    st.write(f"**Rating:** {row['rating']}")
+                    st.markdown(f"**Genres:** {row['listed_in']}")
                     st.write(f"**Director:** {row['director'].split(',')[0] if row['director'] else 'N/A'}")
                     st.write(f"**Top Cast:** {row['cast'].split(',')[0]}...")
-                    st.write(f"**Genres:** {row['listed_in']}")
-                    
-                with col_desc:
-                    st.markdown(f"_{row['description']}_")
+                    st.write(f"**Rating:** {row['rating']}")
                     
                 with col_score:
-                    # Score Feedback: Focus on the overall match and the top driver
                     st.markdown(f"**Match Score:**")
                     st.progress(total_score)
                     
@@ -230,7 +232,9 @@ with col_button:
                     best_match_key = max(driver_scores, key=driver_scores.get)
                     
                     st.caption(f"Strongest Factor: **{best_match_key}**")
-
+                
+                # Description placed outside of the columns to prevent overflow/misalignment
+                st.markdown(f"_{row['description']}_")
                 st.markdown("---")
                 
             # --- Explainer Section ---
@@ -246,4 +250,4 @@ with col_button:
                 )
 
         else:
-            st.error(scores) # Display the error message
+            st.error(scores)
