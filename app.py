@@ -30,19 +30,22 @@ WEIGHTS = {k: v / TOTAL_W for k, v in OPTIMAL_WEIGHTS.items()}
 def load_data():
     """Loads and preprocesses the Netflix data, creating a rich combined text column."""
     try:
-        # NOTE: Assumes netflix_titles.csv is present
-        df = pd.read_csv("netflix_titles.csv") 
+        df = pd.read_csv("netflix_titles.csv")
     except FileNotFoundError:
-        st.error("Error: 'netflix_titles.csv' not found. Please ensure the file is in the same directory.")
-        return pd.DataFrame() 
+        st.error("Fatal Error: 'netflix_titles.csv' not found. Please ensure the file is in the same directory.")
+        return pd.DataFrame()
 
     movies = df[df["type"] == "Movie"].copy().reset_index(drop=True)
+
+    # --- CRITICAL FIX 1: Convert year to integer, coercing errors to NaN and filling with a placeholder ---
+    movies["release_year"] = pd.to_numeric(movies["release_year"], errors='coerce').fillna(2000).astype(int)
 
     for col in ["description", "listed_in", "director", "cast", "country"]:
         movies[col] = movies[col].fillna("")
 
     # --- Feature Engineering for Better Embeddings ---
     def clean_and_limit_cast(cast_str):
+        # Cleans and takes top 3 cast members
         return " ".join(cast_str.split(",")[:3]).replace(",", " ").strip()
 
     movies["all_genres"] = movies["listed_in"].apply(lambda x: x.replace(",", " "))
@@ -63,7 +66,6 @@ def load_data():
 @st.cache_resource
 def load_model():
     """Loads the Sentence Transformer model (cached for performance)."""
-    # 
     return SentenceTransformer("all-MiniLM-L6-v2")
 
 
@@ -81,22 +83,24 @@ def compute_embeddings(texts):
 
 movies = load_data()
 
-if not movies.empty:
-    embeddings = compute_embeddings(movies["combined"])
-    title_to_index = {movies.loc[i, "title"].lower(): i for i in movies.index}
-    movie_titles = list(title_to_index.keys()) 
-else:
-    st.stop() 
+# --- CRITICAL FIX 2: Check for empty data before proceeding ---
+if movies.empty:
+    st.error("Cannot proceed. The data file was not loaded correctly.")
+    st.stop()
+    
+# Proceed only if data is successfully loaded
+embeddings = compute_embeddings(movies["combined"])
+title_to_index = {movies.loc[i, "title"].lower(): i for i in movies.index}
+movie_titles = list(title_to_index.keys()) 
 
 # ---------------------
 # 2. Helper for year score (Exponential decay)
 # ---------------------
 def year_score(query_year, candidate_year, decay_rate=0.15):
     """Calculates a score based on year proximity using exponential decay."""
-    if pd.isna(query_year) or pd.isna(candidate_year):
-        return 0.0
+    # Since release_year is now guaranteed to be an int (or 2000 placeholder), 
+    # pd.isna check is mostly for robustness but simplified.
     diff = abs(query_year - candidate_year)
-    # The exponential decay function: score = e^(-decay_rate * difference)
     return np.exp(-decay_rate * diff)
     # 
 
@@ -105,7 +109,7 @@ def year_score(query_year, candidate_year, decay_rate=0.15):
 
 
 # ---------------------
-# 3. The Hybrid Recommender function (with New Query Path)
+# 3. The Hybrid Recommender function
 # ---------------------
 def recommend(movie_title, num_recommendations, weights):
     """
@@ -116,9 +120,10 @@ def recommend(movie_title, num_recommendations, weights):
     query_title = movie_title
     query_genres = set()
     query_year = None
-    query_source = "Movie Not Found"
+    query_source = "Raw Query"
+    exclude_idx = -1
     
-    # 1. Try to find the movie title (with fuzzy matching)
+    # 1. Determine the query vector and source
     if key in title_to_index:
         idx = title_to_index[key]
         query_vec = embeddings[idx].reshape(1, -1)
@@ -127,9 +132,10 @@ def recommend(movie_title, num_recommendations, weights):
         query_genres = {g.strip() for g in query_genres_str.split(',') if g.strip()}
         query_year = movies.loc[idx, "release_year"]
         query_source = f"Match: {query_title}"
+        exclude_idx = idx
 
     else:
-        # Fuzzy Matching (Cutoff changed from 0.7 to 0.6 for better robustness)
+        # Fuzzy Matching attempt
         close = get_close_matches(key, movie_titles, n=1, cutoff=0.6) 
         if close:
             key = close[0]
@@ -140,13 +146,13 @@ def recommend(movie_title, num_recommendations, weights):
             query_genres = {g.strip() for g in query_genres_str.split(',') if g.strip()}
             query_year = movies.loc[idx, "release_year"]
             query_source = f"Fuzzy Match: {query_title}"
-            st.info(f"🤔 We think you mean: **{query_title}**")
+            exclude_idx = idx
+            st.info(f"🤔 We think you mean: **{query_title}**. Generating hybrid recommendations based on this title.")
         
         else:
-            # --- NEW PATH: Treat input as a raw query ---
-            st.warning(f"💡 Movie **{movie_title}** not found. Generating recommendations based on your description/query.")
+            # Raw Query Path
+            st.warning(f"💡 Movie **'{movie_title}'** not found. Generating recommendations based on your description/query.")
             model = load_model()
-            # Compute the embedding for the raw query text
             query_vec = model.encode([movie_title.strip()], normalize_embeddings=True).reshape(1, -1)
             query_source = f"Raw Query: '{movie_title.strip()}'"
 
@@ -154,30 +160,27 @@ def recommend(movie_title, num_recommendations, weights):
     all_sims = cosine_similarity(query_vec, embeddings)[0]
     
     candidates = []
-    
-    # Check if a specific movie was found to exclude it from recommendations
-    exclude_idx = title_to_index.get(key) if 'Match' in query_source else -1
 
     for i in range(len(movies)):
-        if i == exclude_idx: # Skip the movie itself if it was found
+        if i == exclude_idx:
             continue
 
         base_sim = all_sims[i]
         
-        # --- Multi-Genre Overlap Scoring (Jaccard Similarity) ---
-        candidate_genres_str = movies.loc[i, "listed_in"]
-        candidate_genres = {g.strip() for g in candidate_genres_str.split(',') if g.strip()}
-        
-        # Jaccard only applies if the query was a found movie. Otherwise, genre is 0.
-        if query_genres: 
+        # Jaccard/Year Scoring is only applied if the query was a found movie (Hybrid Mode)
+        if exclude_idx != -1: 
+            candidate_genres_str = movies.loc[i, "listed_in"]
+            candidate_genres = {g.strip() for g in candidate_genres_str.split(',') if g.strip()}
+            
             intersection = len(query_genres.intersection(candidate_genres))
             union = len(query_genres.union(candidate_genres))
             genre_overlap_score = intersection / union if union > 0 else 0.0
+            
+            y_score = year_score(query_year, movies.loc[i, "release_year"])
         else:
+            # If Raw Query, these factors are ignored (score is 0)
             genre_overlap_score = 0.0
-        
-        # Year Proximity only applies if the query was a found movie. Otherwise, year is 0.
-        y_score = year_score(query_year, movies.loc[i, "release_year"]) if query_year else 0.0
+            y_score = 0.0
 
         # Hybrid Score: using defined optimal weights
         total_score = (
@@ -226,8 +229,6 @@ with col_button:
     if st.button("Find My Next Watch 🎬"):
         if not user_input.strip():
             st.warning("Please enter a movie title or a query to get started.")
-            # st.stop() # Removed st.stop() for cleaner user experience
-            # No need to stop, the app will continue below the button block
         
         else:
             # Run the recommender
@@ -256,14 +257,13 @@ with col_button:
                     'Multi-Genre Match': genre_sc,
                     'Year Proximity': year_sc
                 }
-                # Check if genre and year contributed (they won't for raw query)
-                is_hybrid = True if (genre_sc > 0 or year_sc > 0) else False
                 
-                if is_hybrid:
+                # Check if we are in Hybrid Mode (i.e., a movie was found)
+                if 'Match' in query_source:
                     best_match_key = max(driver_scores, key=driver_scores.get)
                     st.caption(f"Strongest Factor: **{best_match_key}** (Semantic: {sim:.3f}, Multi-Genre: {genre_sc:.2f})")
                 else:
-                    st.caption(f"Strongest Factor: **Semantic Match** (Raw query search: {sim:.3f})")
+                    st.caption(f"Search Type: **Semantic Deep Dive** (Match Score: {sim:.3f})")
 
                 st.markdown("---")
                 
@@ -271,14 +271,16 @@ with col_button:
             with st.expander("🔬 How does this work? (The Secret Formula)"):
                 st.markdown(
                     """
-                    Our Matchmaker uses a sophisticated **Hybrid Filtering** system, falling back to a **Semantic Search** if a specific movie is not found.
+                    Our Matchmaker uses a sophisticated **Hybrid Filtering** system, falling back to a powerful **Semantic Search** if a specific movie is not found.
                     
-                    1. **Semantic Deep Dive (80% Weight):** Uses a language model to find similar *themes* and *styles* based on plot, director, and cast.
-                    2. **Multi-Genre Check (15% Weight):** Checks the overlap of **all** listed genres to ensure basic category alignment (Only used when a movie is found).
-                    3. **Year Vibe (5% Weight):** Gently favors movies released close to the original movie's year (Only used when a movie is found).
+                    **Hybrid Mode (Movie Match/Fuzzy Match):**
+                    1. **Semantic Deep Dive (80% Weight):** Uses a language model to find similar *themes* and *styles*.
+                    2. **Multi-Genre Check (15% Weight):** Checks the Jaccard overlap of all genres.
+                    3. **Year Vibe (5% Weight):** Gently favors nearby release years.
                     
-                    **If your input is a general phrase or a movie not in the dataset, it uses Semantic Deep Dive (1) alone.**
+                    **Semantic Search Mode (Raw Query):**
+                    If your input is a general phrase or a movie not in the dataset, it uses **Semantic Deep Dive (1)** alone for the best conceptual match.
                     """
                 )
 
-Would you like to know more about the **Sentence Transformer** model used for the semantic deep dive?
+Would you like to try running this with a sample movie title, like "The Dark Knight"?
