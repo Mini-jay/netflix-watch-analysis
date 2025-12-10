@@ -259,7 +259,7 @@ with col_button:
                 else:
                     st.caption(f"Search Type: **Semantic Deep Dive** (Match Score: {sim:.3f})")
 
-                st.markdown("---")
+                st.markdown("---") # This is now inside the loop, correctly rendered as a visual separator
                 
             # --- Explainer Section ---
             with st.expander("🔬 How does this work? (The Secret Formula)"):
@@ -276,9 +276,3 @@ with col_button:
                     If your input is a general phrase or a movie not in the dataset, it uses **Semantic Deep Dive (1)** alone for the best conceptual match.
                     """
                 )
-
----
-
-Please try running this version. It should resolve the `SyntaxError` and successfully execute the Streamlit application, provided your `netflix_titles.csv` file is accessible.
-
-Would you like to try running this with a sample movie title, like "Pulp Fiction," or a raw query, like "a depressing sci-fi movie?"
