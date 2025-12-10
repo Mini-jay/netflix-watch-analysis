@@ -37,7 +37,7 @@ def load_data():
 
     movies = df[df["type"] == "Movie"].copy().reset_index(drop=True)
 
-    # --- CRITICAL FIX 1: Convert year to integer, coercing errors to NaN and filling with a placeholder ---
+    # Convert year to integer, coercing errors to NaN and filling with a placeholder
     movies["release_year"] = pd.to_numeric(movies["release_year"], errors='coerce').fillna(2000).astype(int)
 
     for col in ["description", "listed_in", "director", "cast", "country"]:
@@ -83,7 +83,7 @@ def compute_embeddings(texts):
 
 movies = load_data()
 
-# --- CRITICAL FIX 2: Check for empty data before proceeding ---
+# Check for empty data before proceeding
 if movies.empty:
     st.error("Cannot proceed. The data file was not loaded correctly.")
     st.stop()
@@ -98,14 +98,8 @@ movie_titles = list(title_to_index.keys())
 # ---------------------
 def year_score(query_year, candidate_year, decay_rate=0.15):
     """Calculates a score based on year proximity using exponential decay."""
-    # Since release_year is now guaranteed to be an int (or 2000 placeholder), 
-    # pd.isna check is mostly for robustness but simplified.
     diff = abs(query_year - candidate_year)
     return np.exp(-decay_rate * diff)
-    # 
-
-[Image of Exponential Decay Function Plot]
-
 
 
 # ---------------------
@@ -283,4 +277,8 @@ with col_button:
                     """
                 )
 
-Would you like to try running this with a sample movie title, like "The Dark Knight"?
+---
+
+Please try running this version. It should resolve the `SyntaxError` and successfully execute the Streamlit application, provided your `netflix_titles.csv` file is accessible.
+
+Would you like to try running this with a sample movie title, like "Pulp Fiction," or a raw query, like "a depressing sci-fi movie?"
