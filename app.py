@@ -7,14 +7,12 @@ from sentence_transformers import SentenceTransformer
 
 # Set Streamlit page config
 st.set_page_config(
-    page_title="Intelligent Hybrid Recommender",
+    page_title="Cinematic Matchmaker",
     layout="wide",
-    initial_sidebar_state="collapsed" # Collapse the sidebar by default
+    initial_sidebar_state="collapsed"
 )
 
 # --- Define Optimal Weights ---
-# We use optimized weights that prioritize the sophisticated semantic vector.
-# This makes the app "just work" well for complex movies like Interstellar.
 OPTIMAL_WEIGHTS = {
     'semantic': 0.80, # High priority for enhanced semantic vector
     'genre': 0.15,     # Moderate priority for Multi-Genre Overlap (Jaccard)
@@ -48,8 +46,7 @@ def load_data():
 
     movies["all_genres"] = movies["listed_in"].apply(lambda x: x.replace(",", " "))
     
-    # Create the enhanced combined text feature: 
-    # Repeat genres for emphasis, include Director/Cast/Country.
+    # Create the enhanced combined text feature
     movies["combined"] = (
         movies["all_genres"] + " " + movies["all_genres"] + " " + movies["all_genres"] + " " +
         movies["description"] + " " +
@@ -85,7 +82,7 @@ movies = load_data()
 if not movies.empty:
     embeddings = compute_embeddings(movies["combined"])
     title_to_index = {movies.loc[i, "title"].lower(): i for i in movies.index}
-    movie_titles = list(title_to_index.keys()) # For suggestions
+    movie_titles = list(title_to_index.keys()) 
 else:
     st.stop() 
 
@@ -111,20 +108,18 @@ def recommend(movie_title, num_recommendations, weights):
     
     # 1. Fuzzy Matching for resilient input
     if key not in title_to_index:
-        close = get_close_matches(key, movie_titles, n=1, cutoff=0.7) # Slightly stricter cutoff for better suggestions
+        close = get_close_matches(key, movie_titles, n=1, cutoff=0.7) 
         if close:
             key = close[0]
-            # Inform user of the match
-            st.info(f"🔍 Found a close match: **{key.title()}**")
+            st.info(f"🤔 We think you mean: **{key.title()}**")
         else:
-            return None, f"❌ Could not find a close match for: **{movie_title}**. Try checking your spelling or selecting from the list."
+            return None, f"🚫 Movie not found: **{movie_title}**. Please check your spelling."
 
     idx = title_to_index[key]
 
     query_vec = embeddings[idx].reshape(1, -1)
     all_sims = cosine_similarity(query_vec, embeddings)[0]
 
-    # Get genres for the query movie
     query_genres_str = movies.loc[idx, "listed_in"]
     query_genres = {g.strip() for g in query_genres_str.split(',') if g.strip()}
     query_year = movies.loc[idx, "release_year"]
@@ -156,7 +151,6 @@ def recommend(movie_title, num_recommendations, weights):
             weights['year'] * y_score
         )
 
-        # Store the component scores for display
         candidates.append((i, total_score, base_sim, genre_overlap_score, y_score)) 
 
     # 3. Sorting and Filtering
@@ -169,89 +163,87 @@ def recommend(movie_title, num_recommendations, weights):
 
 
 # ---------------------
-# 4. Streamlit UI (Simplified)
+# 4. Streamlit UI (Fun Version)
 # ---------------------
 
-st.title("🎬 Smart Netflix Movie Recommender")
+st.title("🍿 Your Cinematic Matchmaker")
 
-st.write(
-    "Enter a movie you enjoyed, and our system will find highly related titles by combining **semantic deep learning** "
-    "on features like **director, cast, and plot** with **multi-genre matching**."
+st.markdown(
+    """
+    We dive deep into the plot, cast, and style of what you love to find your next obsession.
+    No simple genre tags here—just smart, nuanced recommendations.
+    """
 )
 
-st.header("1. Find a Movie")
-
-# Use st.text_input for free-form typing, as requested
+# --- Input Section ---
 user_input = st.text_input(
-    "Enter a movie title (e.g., Interstellar, Roma, The Dark Knight)", 
+    "Tell us a movie you're obsessed with...", 
     placeholder="Type a movie title here..."
 )
 
-# Add a simple slider for the number of recommendations
-num_recs = st.slider("Number of recommendations", 1, 15, 7)
+col_slider, col_button = st.columns([2, 1])
 
-if st.button("Get Recommendations"):
-    if not user_input.strip():
-        st.warning("Please enter a movie title to get started.")
-        st.stop()
-    
-    # Run the recommender with the fixed, optimal weights
-    result_df, scores, query_title = recommend(user_input, num_recs, WEIGHTS)
+with col_slider:
+    num_recs = st.slider("How many suggestions do you want?", 1, 15, 7)
 
-    if isinstance(result_df, pd.DataFrame):
+with col_button:
+    st.markdown("<br>", unsafe_allow_html=True) # Adds a little vertical spacing for alignment
+    if st.button("Find My Next Watch 🎬"):
+        if not user_input.strip():
+            st.warning("Please enter a movie title to get started.")
+            st.stop()
         
-        # Find the index of the *matched* query movie 
-        key = query_title.strip().lower()
-        idx = title_to_index[key]
-        
-        st.success(f"Because you liked **{query_title}**, we recommend:")
-        
-        # Display results with detailed scores
-        for rank, ((_, row), (_, total_score, sim, genre_sc, year_sc)) in enumerate(zip(result_df.iterrows(), scores)):
+        # Run the recommender
+        result_df, scores, query_title = recommend(user_input, num_recs, WEIGHTS)
+
+        if isinstance(result_df, pd.DataFrame):
             
-            st.markdown(f"## {rank+1}. {row['title']} ({row['release_year']})")
+            st.success(f"Perfect Match! Because you love **{query_title}**, try these:")
             
-            col1, col2 = st.columns([1, 2])
-            
-            with col1:
-                # Primary Metadata
-                st.write(f"**Rating:** {row['rating']}")
-                st.write(f"**Director:** {row['director'].split(',')[0] if row['director'] else 'N/A'}")
-                st.write(f"**Cast:** {row['cast'].split(',')[0]}...")
-                st.write(f"**Genres:** {row['listed_in']}")
+            # --- Results Display ---
+            for rank, ((_, row), (_, total_score, sim, genre_sc, year_sc)) in enumerate(zip(result_df.iterrows(), scores)):
                 
-            with col2:
-                # Simplified Score Feedback (Shows the user the scores, but not the weights)
-                st.markdown(f"**Relevance Breakdown (Total Score: {total_score:.3f}):**")
+                st.markdown(f"## {rank+1}. {row['title']} ({row['release_year']})")
                 
-                # Show normalized weighted scores
-                weighted_sim = sim * WEIGHTS['semantic']
-                weighted_genre = genre_sc * WEIGHTS['genre']
-                weighted_year = year_sc * WEIGHTS['year']
+                col_meta, col_desc, col_score = st.columns([1.5, 3, 1.5])
                 
-                st.caption(
-                    f"Semantic Match: **{sim:.3f}** | "
-                    f"Multi-Genre Overlap: **{genre_sc:.2f}** | "
-                    f"Year Proximity: **{year_sc:.2f}**"
+                with col_meta:
+                    st.write(f"**Rating:** {row['rating']}")
+                    st.write(f"**Director:** {row['director'].split(',')[0] if row['director'] else 'N/A'}")
+                    st.write(f"**Top Cast:** {row['cast'].split(',')[0]}...")
+                    st.write(f"**Genres:** {row['listed_in']}")
+                    
+                with col_desc:
+                    st.markdown(f"_{row['description']}_")
+                    
+                with col_score:
+                    # Score Feedback: Focus on the overall match and the top driver
+                    st.markdown(f"**Match Score:**")
+                    st.progress(total_score)
+                    
+                    # Determine the main driver of the high score
+                    driver_scores = {
+                        'Semantic Match': sim,
+                        'Multi-Genre Match': genre_sc,
+                        'Year Proximity': year_sc
+                    }
+                    best_match_key = max(driver_scores, key=driver_scores.get)
+                    
+                    st.caption(f"Strongest Factor: **{best_match_key}**")
+
+                st.markdown("---")
+                
+            # --- Explainer Section ---
+            with st.expander("🔬 How does this work? (The Secret Formula)"):
+                st.markdown(
+                    """
+                    Our Matchmaker uses a sophisticated **Hybrid Filtering** system:
+                    
+                    1. **Semantic Deep Dive (80% Weight):** We use a language model to understand the *meaning* of the plot, director's style, and cast synergy. This ensures we match on *vibe*, not just genre.
+                    2. **Multi-Genre Check (15% Weight):** We check the overlap of **all** listed genres (using Jaccard Similarity) to ensure basic category alignment.
+                    3. **Year Vibe (5% Weight):** A slight preference is given to movies released around the same time, accounting for general production trends.
+                    """
                 )
-                
-                # Use st.progress for a simple visual representation of the final score
-                st.progress(total_score)
-                
-            st.markdown(f"_{row['description']}_")
-            st.markdown("---")
-            
-        # Add a note about the underlying engine in a collapsible expander
-        with st.expander("How these recommendations were calculated:"):
-            st.markdown(
-                f"""
-                The final score is a weighted sum using optimal weights:
-                * **Semantic Similarity ({WEIGHTS['semantic']:.2f})**: Uses deep learning (Sentence Transformers) on the movie's plot, director, and top cast to find similar *themes* and *styles*.
-                * **Multi-Genre Overlap ({WEIGHTS['genre']:.2f})**: Uses Jaccard similarity to measure how many of the movie's total genres match the suggested movie.
-                * **Year Proximity ({WEIGHTS['year']:.2f})**: Gently favors movies released close to the original movie's year.
-                """
-            )
 
-
-    else:
-        st.error(scores) # Display the error message
+        else:
+            st.error(scores) # Display the error message
