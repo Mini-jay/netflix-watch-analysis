@@ -8,7 +8,7 @@ from sentence_transformers import SentenceTransformer
 # Set Streamlit page config
 st.set_page_config(
     page_title="Cinematic Matchmaker",
-    layout="wide",
+    layout="wide", # Uses the full width
     initial_sidebar_state="collapsed"
 )
 
@@ -37,7 +37,7 @@ def load_data():
 
     movies = df[df["type"] == "Movie"].copy().reset_index(drop=True)
 
-    # Convert year to integer, coercing errors to NaN and filling with a placeholder
+    # CRITICAL FIX: Convert year to integer, coercing errors to NaN and filling with a placeholder
     movies["release_year"] = pd.to_numeric(movies["release_year"], errors='coerce').fillna(2000).astype(int)
 
     for col in ["description", "listed_in", "director", "cast", "country"]:
@@ -197,82 +197,87 @@ def recommend(movie_title, num_recommendations, weights):
 # 4. Streamlit UI (Fun & Stacked Version)
 # ---------------------
 
-st.title("🍿 Your Cinematic Matchmaker")
+# Centering Fix: Use columns to create a central content area (4/6ths width)
+col_left, col_center, col_right = st.columns([1, 4, 1])
 
-st.markdown(
-    """
-    We dive deep into the plot, cast, and style of what you love to find your next obsession.
-    **Enter a movie title or even a descriptive phrase** (e.g., "A gritty action film from the 2000s").
-    """
-)
+with col_center:
+    st.title("🍿 Your Cinematic Matchmaker")
 
-# --- Input Section ---
-user_input = st.text_input(
-    "Tell us a movie you're obsessed with...", 
-    placeholder="Type a movie title or a descriptive query here..."
-)
+    st.markdown(
+        """
+        We dive deep into the plot, cast, and style of what you love to find your next obsession.
+        **Enter a movie title or even a descriptive phrase** (e.g., "A gritty action film from the 2000s").
+        """
+    )
 
-col_slider, col_button = st.columns([2, 1])
+    # --- Input Section ---
+    user_input = st.text_input(
+        "Tell us a movie you're obsessed with...", 
+        placeholder="Type a movie title or a descriptive query here..."
+    )
 
-with col_slider:
-    num_recs = st.slider("How many suggestions do you want?", 1, 15, 7)
+    # Use a nested column set for the slider and button, keeping them within the center column
+    col_slider, col_button = st.columns([2, 1])
 
-# Handle the button click logic
-with col_button:
-    st.markdown("<br>", unsafe_allow_html=True) 
-    if st.button("Find My Next Watch 🎬"):
-        if not user_input.strip():
-            st.warning("Please enter a movie title or a query to get started.")
-        
-        else:
-            # Run the recommender
-            result_df, scores, query_title, query_source = recommend(user_input, num_recs, WEIGHTS)
+    with col_slider:
+        num_recs = st.slider("How many suggestions do you want?", 1, 15, 7)
 
-            st.success(f"**Recommendations based on:** {query_source}")
+    # Handle the button click logic
+    with col_button:
+        st.markdown("<br>", unsafe_allow_html=True) 
+        if st.button("Find My Next Watch 🎬"):
+            if not user_input.strip():
+                st.warning("Please enter a movie title or a query to get started.")
             
-            # --- Results Display (STACKED LAYOUT) ---
-            for rank, ((_, row), (_, total_score, sim, genre_sc, year_sc)) in enumerate(zip(result_df.iterrows(), scores)):
-                
-                st.markdown(f"## {rank+1}. {row['title']} ({row['release_year']})")
-                
-                # Metadata section
-                st.write(f"**Rating:** {row['rating']} | **Director:** {row['director'].split(',')[0] if row['director'] else 'N/A'} | **Top Cast:** {row['cast'].split(',')[0]}... | **Genres:** {row['listed_in']}")
+            else:
+                # Run the recommender
+                result_df, scores, query_title, query_source = recommend(user_input, num_recs, WEIGHTS)
 
-                # Description
-                st.markdown(f"**Summary:** _{row['description']}_")
-
-                # Score Feedback section (simplified)
-                st.markdown(f"**Relevance Score: {total_score:.3f}**")
-                st.progress(total_score)
+                st.success(f"**Recommendations based on:** {query_source}")
                 
-                # Determine the main driver of the high score
-                driver_scores = {
-                    'Semantic Match': sim,
-                    'Multi-Genre Match': genre_sc,
-                    'Year Proximity': year_sc
-                }
-                
-                # Check if we are in Hybrid Mode (i.e., a movie was found)
-                if 'Match' in query_source:
-                    best_match_key = max(driver_scores, key=driver_scores.get)
-                    st.caption(f"Strongest Factor: **{best_match_key}** (Semantic: {sim:.3f}, Multi-Genre: {genre_sc:.2f})")
-                else:
-                    st.caption(f"Search Type: **Semantic Deep Dive** (Match Score: {sim:.3f})")
-
-                st.markdown("---") # This is now inside the loop, correctly rendered as a visual separator
-                
-            # --- Explainer Section ---
-            with st.expander("🔬 How does this work? (The Secret Formula)"):
-                st.markdown(
-                    """
-                    Our Matchmaker uses a sophisticated **Hybrid Filtering** system, falling back to a powerful **Semantic Search** if a specific movie is not found.
+                # --- Results Display (STACKED LAYOUT) ---
+                for rank, ((_, row), (_, total_score, sim, genre_sc, year_sc)) in enumerate(zip(result_df.iterrows(), scores)):
                     
-                    **Hybrid Mode (Movie Match/Fuzzy Match):**
-                    1. **Semantic Deep Dive (80% Weight):** Uses a language model to find similar *themes* and *styles*.
-                    2. **Multi-Genre Check (15% Weight):** Checks the Jaccard overlap of all genres.
-                    3. **Year Vibe (5% Weight):** Gently favors nearby release years.
+                    st.markdown(f"## {rank+1}. {row['title']} ({row['release_year']})")
                     
-                    **Semantic Search Mode (Raw Query):**
-                    If your input is a general phrase or a movie not in the dataset, it uses **Semantic Deep Dive (1)** alone for the best conceptual match.
-                    """
-                )
+                    # Metadata section
+                    st.write(f"**Rating:** {row['rating']} | **Director:** {row['director'].split(',')[0] if row['director'] else 'N/A'} | **Top Cast:** {row['cast'].split(',')[0]}... | **Genres:** {row['listed_in']}")
+
+                    # Description
+                    st.markdown(f"**Summary:** _{row['description']}_")
+
+                    # Score Feedback section (simplified)
+                    st.markdown(f"**Relevance Score: {total_score:.3f}**")
+                    st.progress(total_score)
+                    
+                    # Determine the main driver of the high score
+                    driver_scores = {
+                        'Semantic Match': sim,
+                        'Multi-Genre Match': genre_sc,
+                        'Year Proximity': year_sc
+                    }
+                    
+                    # Check if we are in Hybrid Mode (i.e., a movie was found)
+                    if 'Match' in query_source:
+                        best_match_key = max(driver_scores, key=driver_scores.get)
+                        st.caption(f"Strongest Factor: **{best_match_key}** (Semantic: {sim:.3f}, Multi-Genre: {genre_sc:.2f})")
+                    else:
+                        st.caption(f"Search Type: **Semantic Deep Dive** (Match Score: {sim:.3f})")
+
+                    st.markdown("---")
+                    
+                # --- Explainer Section ---
+                with st.expander("🔬 How does this work? (The Secret Formula)"):
+                    st.markdown(
+                        """
+                        Our Matchmaker uses a sophisticated **Hybrid Filtering** system, falling back to a powerful **Semantic Search** if a specific movie is not found.
+                        
+                        **Hybrid Mode (Movie Match/Fuzzy Match):**
+                        1. **Semantic Deep Dive (80% Weight):** Uses a language model to find similar *themes* and *styles*.
+                        2. **Multi-Genre Check (15% Weight):** Checks the Jaccard overlap of all genres.
+                        3. **Year Vibe (5% Weight):** Gently favors nearby release years.
+                        
+                        **Semantic Search Mode (Raw Query):**
+                        If your input is a general phrase or a movie not in the dataset, it uses **Semantic Deep Dive (1)** alone for the best conceptual match.
+                        """
+                    )
